@@ -1,0 +1,251 @@
+# MCP and A2A Protocols
+
+As AI agents become more capable, a practical problem arises: **how do they connect with the outside world?** **MCP (Model Context Protocol)** solves communication between an agent and its **tools/data**. **A2A (Agent-to-Agent)** solves communication between **different agents**. Together, they form the interoperability layer of the agent ecosystem.
+
+---
+
+## 1. MCP — Model Context Protocol
+
+### The Problem
+
+Each tool provider (Slack, GitHub, database, etc.) has its own API, authentication format, and data schema. Without a standard, integrating an agent with 10 tools requires 10 custom integrations. This is the "M×N connectors" problem — M agents × N tools = M×N integrations.
+
+### The Solution
+
+MCP defines a **standardized protocol** to connect agents to data sources and tools. Think of it as the "USB-C of agents" — a single standard that works with any tool.
+
+```
+┌──────────┐     MCP      ┌──────────────┐
+│  Agent   │◄────────────►│  MCP Server  │
+│  (Host)  │ (standardized│   (GitHub)   │
+└──────────┘   protocol)  └──────────────┘
+     │
+     │         MCP      ┌──────────────┐
+     └───────────────────►│  MCP Server  │
+                         │   (Slack)    │
+                         └──────────────┘
+```
+
+### Architecture
+
+| Component | Role | Example |
+| :--- | :--- | :--- |
+| **Host** | Application that hosts the agent | Claude Desktop, IDE, custom app |
+| **Client** | Maintains a 1:1 connection with a server | Created by the host for each server |
+| **Server** | Exposes tools and data via MCP | GitHub MCP server, Postgres MCP server, etc. |
+
+### What an MCP Server Exposes
+
+A server can offer three types of resources:
+
+**1. Tools** — Actions the agent can execute:
+```json
+{
+  "name": "create_issue",
+  "description": "Creates an issue on GitHub",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "title": { "type": "string" },
+      "body": { "type": "string" },
+      "repo": { "type": "string" }
+    }
+  }
+}
+```
+
+**2. Resources** — Data the agent can read:
+```json
+{
+  "uri": "github://repo/org/project/issues",
+  "name": "Project issue list",
+  "mimeType": "application/json"
+}
+```
+
+**3. Prompts** — Pre-defined prompt templates:
+```json
+{
+  "name": "code_review",
+  "description": "Reviews a PR",
+  "arguments": [{ "name": "pr_number", "required": true }]
+}
+```
+
+### Transport
+
+MCP supports two transport mechanisms:
+
+- **stdio:** Communication via stdin/stdout. Ideal for local servers (processes on the same machine).
+- **HTTP + SSE (Streamable HTTP):** For remote servers. The client makes HTTP requests and receives events via Server-Sent Events.
+
+---
+
+## 2. A2A — Agent-to-Agent Protocol
+
+### The Problem
+
+MCP connects agents to tools, but what about when an **agent needs to delegate work to another agent**? Different agents may belong to different companies, run on different infrastructure, and use different LLMs. We need a protocol for them to communicate.
+
+### The Solution
+
+A2A, proposed by Google, defines how agents **discover each other's capabilities** and **collaborate on tasks**, regardless of framework or provider.
+
+```
+┌──────────────┐    A2A     ┌──────────────┐
+│   Agent A    │◄──────────►│   Agent B    │
+│  (Client)    │ (HTTP/JSON │  (Remote)    │
+│              │  protocol) │              │
+│  LangGraph   │            │  CrewAI      │
+│  + Claude    │            │  + GPT-4     │
+└──────────────┘            └──────────────┘
+```
+
+### Agent Card — Capability Discovery
+
+Each agent publishes an **Agent Card** at `/.well-known/agent.json`:
+
+```json
+{
+  "name": "Travel Agent",
+  "description": "Agent specialized in travel planning",
+  "url": "https://travel-agent.example.com",
+  "capabilities": {
+    "streaming": true,
+    "pushNotifications": true
+  },
+  "skills": [
+    {
+      "id": "flight_search",
+      "name": "Flight Search",
+      "description": "Finds and compares flights",
+      "examples": ["Search flight from NYC to London in March"]
+    },
+    {
+      "id": "hotel_booking",
+      "name": "Hotel Booking",
+      "description": "Searches and books hotels"
+    }
+  ]
+}
+```
+
+A client agent can query the Agent Cards of multiple remote agents to decide which one is best suited for a subtask.
+
+### Key A2A Concepts
+
+| Concept | Description |
+| :--- | :--- |
+| **Task** | Central unit of work. Has states: `submitted`, `working`, `input-required`, `completed`, `failed` |
+| **Message** | Communication between agents within a task. Has role: `user` or `agent` |
+| **Part** | Content within a message: `TextPart`, `FilePart`, `DataPart` |
+| **Artifact** | Output generated by the agent (files, structured data) |
+
+### Task Flow
+
+```
+Client                          Remote Agent
+   │                                  │
+   │──── POST /tasks/send ──────────►│
+   │     {message: "Search flight     │
+   │      NYC→London on Mar 15"}      │
+   │                                  │
+   │◄─── {status: "working"} ────────│
+   │                                  │
+   │◄─── {status: "input-required",──│
+   │      message: "Economy or        │
+   │      business class?"}           │
+   │                                  │
+   │──── {message: "Economy"} ──────►│
+   │                                  │
+   │◄─── {status: "completed", ──────│
+   │      artifacts: [results]}      │
+```
+
+---
+
+## 3. MCP vs A2A — When to Use Each
+
+```
+┌─────────────────────────────────────────────┐
+│              Main Agent                     │
+│                                             │
+│  ┌──── MCP ─────┐    ┌──── A2A ─────┐      │
+│  │ Tools        │    │ Other Agents  │      │
+│  │ - GitHub     │    │ - Travel Agent│      │
+│  │ - Slack      │    │ - Legal Agent │      │
+│  │ - Database   │    │ - Data Agent  │      │
+│  └──────────────┘    └───────────────┘      │
+└─────────────────────────────────────────────┘
+```
+
+| Aspect | MCP | A2A |
+| :--- | :--- | :--- |
+| **Connects** | Agent ↔ Tool/Data | Agent ↔ Agent |
+| **Model** | Client-Server | Peer-to-Peer (via HTTP) |
+| **Complexity of the "other side"** | Server exposes simple functions | Autonomous agent with its own reasoning |
+| **Who decides** | The host agent decides everything | Each agent has autonomy |
+| **State** | Stateless (each call is independent) | Stateful (tasks with a lifecycle) |
+| **Interaction** | Synchronous (request-response) | Can be asynchronous (long-running tasks) |
+| **Created by** | Anthropic | Google |
+
+### Used Together
+
+In practice, the two protocols are **complementary**:
+
+1. The main agent uses **MCP** to access its local tools (database, internal APIs)
+2. The main agent uses **A2A** to delegate subtasks to specialized third-party agents
+3. The remote agents, in turn, use **MCP** to access their own tools
+
+---
+
+## 4. Concrete Example — Recruitment System
+
+```
+┌──────────────────────┐
+│   HR Agent           │
+│   (Orchestrator)     │
+│                      │
+│  MCP: internal DB    │
+│  MCP: email          │
+│                      │
+│  A2A ──► Screening   │───► Analyzes LinkedIn, GitHub
+│          Agent       │     Returns candidate ranking
+│                      │
+│  A2A ──► Assessment  │───► Analyzes cultural fit
+│          Agent       │     Returns score and justification
+│                      │
+│  A2A ──► Compensation│───► Generates salary proposal
+│          Agent       │     Based on market data
+└──────────────────────┘
+```
+
+- The HR agent uses **MCP** to read data from the internal database and send emails
+- It uses **A2A** to delegate candidate analysis, assessment, and compensation to specialized agents (which may belong to different companies)
+- Each remote agent publishes its **Agent Card** describing its skills
+
+---
+
+## 5. Advantages and Limitations
+
+**Interoperability:** Agents from any framework/provider can communicate via open protocols.
+
+**Ecosystem:** MCP already has hundreds of available servers (GitHub, Slack, Postgres, etc.). A2A is growing rapidly.
+
+**Separation of concerns:** MCP for tools, A2A for agent collaboration — each protocol does one thing well.
+
+**Explicit security:** Both protocols define authentication and access control mechanisms.
+
+**Maturity:** Both protocols are relatively new. A2A especially is still in the early adoption phase.
+
+**Operational complexity:** Managing multiple MCP servers and A2A agents requires observability, monitoring, and retry policies.
+
+**Network latency:** Each A2A call involves network, serialization, and potentially queuing — slower than everything running in the same process.
+
+**Trust between agents:** Delegating to an external agent via A2A requires trust in that agent's quality and security.
+
+---
+
+## Conclusion
+
+MCP and A2A are the two pillars of interoperability in the AI agent ecosystem. MCP standardizes how agents access tools and data — eliminating the problem of N custom connectors. A2A standardizes how agents collaborate with each other — enabling an ecosystem where specialized agents from different providers work together. As the ecosystem matures, these protocols are poised to become as fundamental for agents as HTTP is for the web.
